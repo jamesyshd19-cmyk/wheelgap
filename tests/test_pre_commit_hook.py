@@ -48,6 +48,10 @@ def test_pre_commit_hook_matches_dependency_and_config_files(path: str):
         "README.md",
         "setup.py",
         "src/app.py",
+        "example.py.lock.bak",
+        # The hook runs `wheelgap .`, which never picks a script lock, so changing one shouldn't run it.
+        "example.py.lock",
+        "scripts/tool.py.lock",
         "my-pyproject.toml",
         "my-uv.toml",
         "foo.python-version",

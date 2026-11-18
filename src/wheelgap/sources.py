@@ -146,6 +146,10 @@ class Source:
     uv_packages: list[dict] | None = None
     uv_manifest: dict = field(default_factory=dict)
     uv_pyproject: Path | None = None
+    # A script's lock (example.py.lock, from uv lock --script): the script's path, as the lock's was given. uv takes
+    # no dependency groups for it from a pyproject.toml beside it, so uv_pyproject is None; --fix's config goes in the
+    # script's block.
+    uv_script: str | None = None
     uv_default_groups: list[str] = field(default_factory=lambda: ["dev"])
     uv_selection: UvSelection | None = None
     # A requirements file (requirements.txt, .in, requirements.lock): unpinned lines get the newest release.
@@ -365,12 +369,76 @@ def _uv_edges(path: Path, p: dict) -> list[Edge]:
     return out
 
 
+_UV_BUILD_RESTRICTIONS = ("no-build", "no-binary", "no-build-package", "no-binary-package")
+
+
+def _sets_build_restriction(uv: object) -> list[str]:
+    """The build restrictions a [tool.uv] table (or uv.toml) turns on: true, or a non-empty list."""
+    return [key for key in _UV_BUILD_RESTRICTIONS if isinstance(uv, dict) and uv.get(key)]
+
+
+def _uv_config(directory: Path) -> tuple[Path, object] | None:
+    """The uv settings uv reads in `directory`: its uv.toml, else a pyproject.toml with a [tool.uv] table. uv skips a
+    pyproject.toml without one (and one it can't read) and keeps looking in the folders above."""
+    for name in ("uv.toml", "pyproject.toml"):
+        config = directory / name
+        if not config.is_file():
+            continue
+        try:
+            data = tomllib.loads(config.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            continue
+        if name == "uv.toml":
+            return config, data
+        tool = data.get("tool")
+        if isinstance(tool, dict) and "uv" in tool:
+            return config, tool["uv"]
+    return None
+
+
+def _refuse_script_build_restrictions(path: Path) -> None:
+    """A script's lock (example.py.lock) doesn't record the build restrictions in the script's own [tool.uv], which
+    `uv run` applies; rather than answer as if they weren't there, refuse a lock whose script beside it sets them.
+    The same goes for a uv.toml or pyproject.toml [tool.uv] in a folder above the lock (up to the repository root),
+    which uv also applies when there's none beside it (a pyproject.toml without [tool.uv] doesn't count):
+    _uv_build_restrictions reads only the lock's own folder."""
+    if not path.name.endswith(".py.lock"):
+        return
+    folder = path.resolve().parent
+    if _uv_config(folder) is None and not (folder / ".git").exists():
+        for directory in folder.parents:
+            if (found := _uv_config(directory)) is not None:
+                config, uv = found
+                if keys := _sets_build_restriction(uv):
+                    raise SourceError(
+                        f"{path.name}: {config} sets {', '.join(keys)}, which wheelgap doesn't read from a folder "
+                        "above a script's lock yet, so it can't say what `uv run` would install"
+                    )
+                break
+            if (directory / ".git").exists():
+                break
+    script = path.with_name(path.name.removesuffix(".lock"))
+    if not script.is_file():
+        return
+    try:
+        data = _script_metadata(script)
+    except (SourceError, OSError):
+        return  # no readable block beside it: nothing to apply, and the lock itself is still read
+    uv = data.get("tool", {}).get("uv", {}) if isinstance(data.get("tool"), dict) else {}
+    if keys := _sets_build_restriction(uv):
+        raise SourceError(
+            f"{path.name}: the script {script.name} sets {', '.join(keys)} in its [tool.uv], which wheelgap "
+            "doesn't read for a script's lock yet, so it can't say what `uv run` would install"
+        )
+
+
 def _uv_build_restrictions(path: Path, source: Source) -> None:
     """Apply uv's project-level build and wheel restrictions to index packages in a lockfile.
 
     uv.toml takes precedence over [tool.uv] in pyproject.toml when both are present.
     uv's pip-only [tool.uv.pip] options do not apply to uv sync.
     """
+    _refuse_script_build_restrictions(path)
     config_path = path.with_name("uv.toml")
     standalone = config_path.is_file()
     if not standalone:
@@ -437,7 +505,10 @@ def parse_uv_lock(path: Path) -> Source:
     members = {canonicalize_name(m) for m in manifest.get("members", [])}
     edges: dict[int, list[Edge]] = {}
     source = Source(path.name, edges=edges, uv_packages=data.get("package", []), uv_manifest=manifest)
-    source.uv_pyproject = path.with_name("pyproject.toml")
+    if path.name.endswith(".py.lock"):
+        source.uv_script = str(path).removesuffix(".lock")  # as given, so --fix's `uv lock --script` runs from here
+    else:
+        source.uv_pyproject = path.with_name("pyproject.toml")
     for p in data.get("package", []):
         src = p.get("source", {})
         pkg = Package(package_name(path, p.get("name")), p.get("version"), origin=path.name)
@@ -545,6 +616,9 @@ def select_uv_dependencies(
                 _select_poetry(source, selection)
             continue
         if source.uv_packages is None:
+            continue
+        if source.uv_script is not None and not strict:
+            # A script's lock has no extras or groups; [tool.wheelgap]'s belong to the project beside it.
             continue
         pyproject = source.uv_pyproject
         if pyproject is not None and pyproject.is_file():
@@ -1193,8 +1267,8 @@ def parse_pyproject(path: Path) -> Source:
 _SCRIPT_BLOCK = re.compile(r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
 
 
-def parse_script(path: Path) -> Source:
-    """Read a script's one PEP 723 `# /// script` block; never execute the Python file."""
+def _script_metadata(path: Path) -> dict:
+    """The TOML of a script's one PEP 723 `# /// script` block; never execute the Python file."""
     try:
         text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
@@ -1212,6 +1286,12 @@ def parse_script(path: Path) -> Source:
         data = tomllib.loads(content)
     except tomllib.TOMLDecodeError as e:
         raise SourceError(f"{path}: invalid TOML in the # /// script block: {e}") from None
+    return data
+
+
+def parse_script(path: Path) -> Source:
+    """Read a script's one PEP 723 `# /// script` block; never execute the Python file."""
+    data = _script_metadata(path)
     return _project_source(
         {
             "project": {key: data[key] for key in ("dependencies", "requires-python") if key in data},
@@ -2488,6 +2568,8 @@ def file_kind(path: Path) -> str:
         return PARSERS[name]
     if name.startswith("pylock.") and name.endswith(".toml"):
         return "pylock"
+    if name.endswith(".py.lock"):  # uv lock --script example.py, before requirements*.lock (requirements.py.lock)
+        return "uv"
     if name.startswith("requirements") and name.endswith(".lock"):
         return "requirements"
     if name.endswith(".lock") and "uv" in name:
@@ -2498,8 +2580,9 @@ def file_kind(path: Path) -> str:
         return "pip-report"
     raise SourceError(
         f"don't know how to read {path} "
-        "(expected uv.lock, pylock.toml, poetry.lock, pdm.lock, Pipfile.lock, pixi.lock, requirements.lock, "
-        "requirements.txt, pip report.json, environment.yml, pyproject.toml or a script.py with a # /// script block)"
+        "(expected uv.lock, script.py.lock, pylock.toml, poetry.lock, pdm.lock, Pipfile.lock, pixi.lock, "
+        "requirements.lock, requirements.txt, pip report.json, environment.yml, pyproject.toml "
+        "or a script.py with a # /// script block)"
     )
 
 

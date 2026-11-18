@@ -1948,11 +1948,16 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             sources = (
                 [parse_dist(Path(args.dist))] if args.dist else load_inputs(args.inputs or ["."], args.environment)
             )
-        if args.print_gap_wheel_snippet and (len(sources) != 1 or sources[0].kind not in gapwheels.SNIPPET_KINDS):
+        if args.print_gap_wheel_snippet and (
+            len(sources) != 1
+            or sources[0].kind not in gapwheels.SNIPPET_KINDS
+            or sources[0].uv_script is not None  # a script's lock: its config goes in the script, as for a script
+        ):
             # Decided from the inputs, before any lookup, so the exit code doesn't depend on what the index has.
             raise SourceError(
                 f"--print-gap-wheel-snippet has no snippet for {', '.join(s.label for s in sources)}: it takes one "
-                "uv.lock, one requirements file or package names on the command line (--fix alone covers the others)"
+                "uv.lock (not a script's), one requirements file or package names on the command line "
+                "(--fix alone covers the others)"
             )
         for source in sources:
             check_report_targets(source, targets)
@@ -2046,8 +2051,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 # can't see, so it refuses rather than answer for the wrong index.
                 if not (source.requirements or source.pyproject_extras is not None):
                     continue
-                # wheelgap can't read a script's lock (example.py.lock), so a script gets no lockfile advice.
-                instead = "" if source.kind == "script" else ", so check a lockfile instead"
+                instead = (
+                    ", so check its lock (uv lock --script) instead"
+                    if source.kind == "script"
+                    else ", so check a lockfile instead"
+                )
                 if not source.pypi_only:
                     what = "the script" if source.kind == "script" else "the project"
                     raise SourceError(
