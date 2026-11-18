@@ -2769,6 +2769,11 @@ def test_pyproject_groups_without_project(capsys, fake_pypi, tmp_path, flag):
         (GROUPS_ONLY_PYPROJECT, ["--only-group", "test", "--all-extras"], "no [project] optional-dependencies"),
         ("[tool.wheelgap]\n", [], "no [project] table"),
         ('project = "invalid"\n' + GROUPS_ONLY_PYPROJECT, ["--group", "test"], "no [project] table"),
+        (
+            '[tool.poetry.dependencies]\npython = "^3.10"\nnumpy = "*"\n' + GROUPS_ONLY_PYPROJECT,
+            ["--group", "test"],
+            "[tool.poetry.dependencies]",
+        ),
     ],
 )
 def test_pyproject_groups_without_project_errors(capsys, fake_pypi, tmp_path, text, flags, error):

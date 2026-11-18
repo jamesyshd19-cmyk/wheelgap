@@ -1237,9 +1237,10 @@ def _project_source(data: dict, path: Path, script: bool = False) -> Source:
             f"{path}: [project] dependencies is dynamic (set by the build backend), so wheelgap can't read it; "
             "check a lockfile instead"
         )
-    if not script and not groups_only and not project.get("dependencies") and not project.get("optional-dependencies"):
+    if not script and not project.get("dependencies") and not project.get("optional-dependencies"):
         # poetry-core 2 builds [tool.poetry.dependencies] into the package whenever [project] lists no dependencies
-        # or optional-dependencies (missing or empty: DependencyGroup.dependencies' "legacy mode").
+        # or optional-dependencies (missing or empty: DependencyGroup.dependencies' "legacy mode"). A groups-only file
+        # with them is a Poetry project too: --group would leave its dependencies out.
         tool = data.get("tool")
         poetry = tool.get("poetry") if isinstance(tool, dict) else None
         poetry_deps = poetry.get("dependencies") if isinstance(poetry, dict) else None
