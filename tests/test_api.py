@@ -857,6 +857,14 @@ def test_check_lockfile_deps_checks_a_compiled_file_as_written(index, tmp_path):
     assert all("/lib/" in url or "/crypt/" in url for url in index)
 
 
+def test_check_lockfile_deps_refuses_groups_only_pyproject(fake_pypi, tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[dependency-groups]\ntest = ["app"]\n', encoding="utf-8")
+    with pytest.raises(SourceError, match=r"no \[project\] table"):
+        wheelgap.check_lockfile(pyproject, [WIN], deps=True)
+    assert not fake_pypi
+
+
 def test_check_lockfile_deps_prefers_a_lockfile_beside_pyproject(tmp_path):
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "w"\ndependencies = ["app"]\n', encoding="utf-8")
     (tmp_path / "uv.lock").write_text(LOCK_ABI3, encoding="utf-8")

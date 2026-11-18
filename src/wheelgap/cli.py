@@ -1988,11 +1988,21 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 raise SourceError(
                     "--no-dev doesn't apply to pyproject.toml: no dependency group is selected by default"
                 )
-            if args.only_group and (args.extra or args.all_extras):
-                raise SourceError(
-                    "--only-group cannot be combined with --extra or --all-extras for pyproject.toml inputs"
-                )
             for source in pyproject_sources:
+                if source.pyproject_groups_only:
+                    if args.extra or args.all_extras:
+                        raise SourceError(f"{source.label}: no [project] optional-dependencies to select from")
+                    if not (args.group or args.only_group):
+                        if source.pyproject_groups:
+                            names = ", ".join(sorted(source.pyproject_groups))
+                            raise SourceError(
+                                f"{source.label}: no [project] table; pick one with --group or --only-group: {names}"
+                            )
+                        raise SourceError(f"{source.label}: no [project] table and no groups to select")
+                if args.only_group and (args.extra or args.all_extras):
+                    raise SourceError(
+                        "--only-group cannot be combined with --extra or --all-extras for pyproject.toml inputs"
+                    )
                 select_pyproject_groups(source, args.group or [], args.only_group or [])
                 select_pyproject_extras(source, args.extra or [], args.all_extras)
         if (from_cli or args.only_group or extra_names is not None or group_names is not None) and (

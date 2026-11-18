@@ -483,6 +483,8 @@ def _check_lockfile(
             f"wheelgap.diff don't read it; pass a lockfile (the wheelgap command checks {what})"
         )
     source: Source = load_file(lockfile, environment)
+    if source.pyproject_groups_only:
+        raise SourceError(f"{lockfile}: no [project] table, so there are no dependencies to read")
     if environment is not None and source.kind != "pixi":
         raise SourceError(f"{lockfile}: environment applies to pixi.lock only")
 

@@ -350,6 +350,11 @@ errors (exit 2); a group that isn't selected isn't read further than its name. `
 group is included by default. A `dependencies` listed in `[project] dynamic` is an input error (exit 2), as are dynamic
 `optional-dependencies` with `--extra`/`--all-extras` and Poetry dependencies kept in `[tool.poetry.dependencies]`
 (check `poetry.lock` instead).
+
+A `pyproject.toml` with `[dependency-groups]` and no `[project]` table requires `--group NAME` or `--only-group NAME`.
+Both flags check the selected groups, including any included groups, and work with `--deps`. `--extra` and
+`--all-extras` are input errors because the file has no `[project] optional-dependencies`.
+
 `check_lockfile()` and `wheelgap diff` don't read `pyproject.toml` as an input.
 
 ## Python scripts

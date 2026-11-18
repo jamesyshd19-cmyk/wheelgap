@@ -157,6 +157,8 @@ class Source:
     pyproject_dynamic_extras: bool = False
     # PEP 735 groups, expanded only when explicitly selected.
     pyproject_groups: dict[str, object] = field(default_factory=dict)
+    # A pyproject.toml with a [dependency-groups] table and no [project] table.
+    pyproject_groups_only: bool = False
     # pyproject.toml only: the canonical [project] name, to spot `myproject[extra]` self-references.
     pyproject_name: str | None = None
     # poetry.lock only: each package's [[package]] table, kept so --group/--only-group/--no-dev can pick packages
@@ -1178,7 +1180,7 @@ def _nearby_config_names_an_index(path: Path) -> bool:
 
 
 def parse_pyproject(path: Path) -> Source:
-    """Read a library's [project] dependencies as requirement lines."""
+    """Read [project] dependencies and record available PEP 735 groups."""
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
@@ -1223,7 +1225,8 @@ def parse_script(path: Path) -> Source:
 def _project_source(data: dict, path: Path, script: bool = False) -> Source:
     """Shared requirement and provenance handling for project and script metadata (`script`: a # /// script block,
     which errors name instead of [project])."""
-    project = data.get("project")
+    groups_only = "project" not in data and isinstance(data.get("dependency-groups"), dict)
+    project = {} if groups_only else data.get("project")
     if not isinstance(project, dict):
         raise SourceError(f"{path}: no [project] table, so there are no dependencies to read")
     dynamic = project.get("dynamic", [])
@@ -1234,7 +1237,7 @@ def _project_source(data: dict, path: Path, script: bool = False) -> Source:
             f"{path}: [project] dependencies is dynamic (set by the build backend), so wheelgap can't read it; "
             "check a lockfile instead"
         )
-    if not script and not project.get("dependencies") and not project.get("optional-dependencies"):
+    if not script and not groups_only and not project.get("dependencies") and not project.get("optional-dependencies"):
         # poetry-core 2 builds [tool.poetry.dependencies] into the package whenever [project] lists no dependencies
         # or optional-dependencies (missing or empty: DependencyGroup.dependencies' "legacy mode").
         tool = data.get("tool")
@@ -1276,6 +1279,7 @@ def _project_source(data: dict, path: Path, script: bool = False) -> Source:
         path.name,
         pyproject_extras=extras,
         pyproject_groups=normalized_groups,
+        pyproject_groups_only=groups_only,
         pyproject_dynamic_extras="optional-dependencies" in dynamic,
         pypi_only=not (_names_an_index(data) or _nearby_config_names_an_index(path)),
     )
