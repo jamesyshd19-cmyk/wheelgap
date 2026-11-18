@@ -1222,6 +1222,19 @@ def parse_script(path: Path) -> Source:
     )
 
 
+def _builds_a_package(data: dict, path: Path) -> bool:
+    """Whether a pyproject.toml with no [project] table still describes a buildable project: a [build-system]
+    table, a setup.py or setup.cfg beside it, [tool.flit.metadata], or PDM-legacy [tool.pdm] dependencies."""
+    if "build-system" in data or (path.parent / "setup.py").exists() or (path.parent / "setup.cfg").exists():
+        return True
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return False
+    flit = tool.get("flit")
+    pdm = tool.get("pdm")
+    return (isinstance(flit, dict) and "metadata" in flit) or (isinstance(pdm, dict) and "dependencies" in pdm)
+
+
 def _project_source(data: dict, path: Path, script: bool = False) -> Source:
     """Shared requirement and provenance handling for project and script metadata (`script`: a # /// script block,
     which errors name instead of [project])."""
@@ -1249,6 +1262,13 @@ def _project_source(data: dict, path: Path, script: bool = False) -> Source:
                 f"{path}: the dependencies are in [tool.poetry.dependencies], not [project] dependencies, "
                 "so wheelgap can't read them; check poetry.lock instead"
             )
+    if groups_only and _builds_a_package(data, path):
+        # A setuptools, flit or PDM-legacy project keeps its dependencies outside [project]: checking only a group
+        # would leave them out, and a group entry like `mypkg[test]` would look up an unrelated PyPI package.
+        raise SourceError(
+            f"{path}: no [project] table; the project's dependencies are in setup.py/setup.cfg or its build "
+            "backend's settings, which wheelgap doesn't read; check a lockfile instead"
+        )
     dependencies = project.get("dependencies", [])
     if not isinstance(dependencies, list) or not all(isinstance(d, str) for d in dependencies):
         where = "the # /// script block's dependencies" if script else "[project] dependencies"

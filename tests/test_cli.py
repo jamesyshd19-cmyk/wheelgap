@@ -2784,6 +2784,35 @@ def test_pyproject_groups_without_project_errors(capsys, fake_pypi, tmp_path, te
     assert not fake_pypi
 
 
+@pytest.mark.parametrize("flag", ["--group", "--only-group"])
+@pytest.mark.parametrize(
+    "text,beside",
+    [
+        (GROUPS_ONLY_PYPROJECT, "setup.py"),
+        (GROUPS_ONLY_PYPROJECT, "setup.cfg"),
+        (
+            '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n'
+            + GROUPS_ONLY_PYPROJECT,
+            None,
+        ),
+        ('[tool.flit.metadata]\nmodule = "mypkg"\nrequires = ["numpy"]\n' + GROUPS_ONLY_PYPROJECT, None),
+        ('[tool.pdm]\ndependencies = ["numpy"]\n' + GROUPS_ONLY_PYPROJECT, None),
+    ],
+    ids=["setup-py", "setup-cfg", "build-system", "flit-metadata", "pdm-dependencies"],
+)
+def test_pyproject_groups_without_project_in_a_buildable_project_errors(
+    capsys, fake_pypi, tmp_path, text, beside, flag
+):
+    # The project's own dependencies live outside [project], so checking only the group would be a wrong answer.
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text, encoding="utf-8")
+    if beside:
+        (tmp_path / beside).write_text("", encoding="utf-8")
+    code, _, err = run(capsys, str(path), "-p", "3.13", "-t", "linux-x86_64", flag, "test")
+    assert code == 2 and "no [project] table" in err and "setup.py/setup.cfg" in err
+    assert not fake_pypi
+
+
 @pytest.mark.parametrize(
     "groups,flags,error",
     [

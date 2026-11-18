@@ -354,6 +354,9 @@ group is included by default. A `dependencies` listed in `[project] dynamic` is 
 A `pyproject.toml` with `[dependency-groups]` and no `[project]` table requires `--group NAME` or `--only-group NAME`.
 Both flags check the selected groups, including any included groups, and work with `--deps`. `--extra` and
 `--all-extras` are input errors because the file has no `[project] optional-dependencies`.
+A file like that which still builds a package stays an input error (exit 2): one with a `[build-system]` table, a
+`setup.py` or `setup.cfg` beside it, `[tool.flit.metadata]` or `[tool.pdm] dependencies`, since its dependencies are
+kept where wheelgap doesn't read them (check a lockfile instead).
 
 `check_lockfile()` and `wheelgap diff` don't read `pyproject.toml` as an input.
 
