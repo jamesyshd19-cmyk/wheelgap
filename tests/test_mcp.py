@@ -123,7 +123,7 @@ def test_check_package(fake_pypi):
     assert data["ok"] is False
     assert data["gaps"] == ["3.13 linux-aarch64"]
     assert data["version"] == "311"
-    assert data["assumes"] == {"glibc": "2.36", "musl": "1.2", "macos": "14.0"}
+    assert data["assumes"] == {"glibc": "2.36", "musl": "1.2", "macos": "14.0", "ios": "13.0", "android_api": "24"}
     assert data["suggest"] == {} and data["last_with_wheel"] == {}
     # The second request reads the older releases for the way out, as --suggest does.
     assert fake_pypi == ["https://pypi.org/pypi/winonly/json"] * 2
@@ -1236,6 +1236,7 @@ def test_list_targets():
     assert "musl-aarch64" in data["platforms"]
     assert data["groups"]["all"] and set(data["groups"]["all"]) <= set(data["platforms"])
     assert set(data["aliases"].values()) <= set(data["platforms"])
+    assert data["defaults"] == {"glibc": "2.36", "musl": "1.2", "macos": "14.0", "ios": "13.0", "android_api": "24"}
 
 
 @pytest.mark.parametrize("uri", [False, True])
@@ -1997,11 +1998,15 @@ def lockfile_pair(tmp_path, old: str, new: str) -> tuple[str, str]:
     return paths[0], paths[1]
 
 
-def uv_package(name: str, version: str, kind: str = "wheel") -> str:
-    """A uv.lock [[package]] entry that records one wheel or one sdist, so no lookup is needed."""
+def uv_package(name: str, version: str, kind: str = "wheel", *, tags: tuple[str, ...] = ("py3-none-any",)) -> str:
+    """A uv.lock [[package]] entry with wheels or an sdist, so no lookup is needed."""
     url = f"https://files.pythonhosted.org/packages/aa/{name}-{version}"
     if kind == "wheel":
-        files = f'wheels = [\n    {{ url = "{url}-py3-none-any.whl", hash = "sha256:00", size = 1 }},\n]\n'
+        files = (
+            "wheels = [\n"
+            + "".join(f'    {{ url = "{url}-{tag}.whl", hash = "sha256:00", size = 1 }},\n' for tag in tags)
+            + "]\n"
+        )
     else:
         files = f'sdist = {{ url = "{url}.tar.gz", hash = "sha256:00", size = 1 }}\n'
     return (
@@ -2009,6 +2014,71 @@ def uv_package(name: str, version: str, kind: str = "wheel") -> str:
         + files
         + "\n"
     )
+
+
+@pytest.mark.parametrize("tool", ["check_package", "check_lockfile", "check_dist", "diff_lockfiles"])
+def test_mcp_mobile_version_floors(fake_pypi, tmp_path, monkeypatch, tool):
+    tags = ("cp313-cp313-ios_15_0_arm64_iphoneos", "cp313-cp313-android_26_arm64_v8a")
+    filenames = [f"mobilefloors-1.1-{tag}.whl" for tag in tags]
+    monkeypatch.setitem(FAKE_INDEX, "mobilefloors", {"1.1": filenames})
+    old, new = lockfile_pair(tmp_path, uv_package("mobilefloors", "1.0"), uv_package("mobilefloors", "1.1", tags=tags))
+    folder = dist(tmp_path, *filenames)
+    inputs = {
+        "check_package": {"name": "mobilefloors", "version": "1.1"},
+        "check_lockfile": {"path": new, "offline": True},
+        "check_dist": {"path": str(folder)},
+        "diff_lockfiles": {"old": old, "new": new},
+    }
+    args = inputs[tool] | {"python": "3.13", "targets": ["ios-arm64", "android-arm64"]}
+    _, default, bad_ios, bad_api, good = run(
+        init(),
+        call(tool, **args),
+        call(tool, 2, **args, ios="abc"),
+        call(tool, 3, **args, android_api=26),
+        call(tool, 4, **args, ios="15.0", android_api="26"),
+    )
+    for reply, message in ((bad_ios, "can't parse iOS version"), (bad_api, "'android_api' must be a string")):
+        assert reply["result"]["isError"] is True
+        assert message in reply["result"]["content"][0]["text"]
+    assert default["result"]["isError"] is False and good["result"]["isError"] is False
+    default_data = default["result"]["structuredContent"]
+    good_data = good["result"]["structuredContent"]
+    assert default_data["ok"] is False and good_data["ok"] is True
+    missing = {"3.13 ios-arm64": "missing", "3.13 android-arm64": "missing"}
+    if tool == "check_package":
+        assert default_data["results"] == missing
+        assert good_data["results"] == dict.fromkeys(missing, "wheel")
+        assert good_data["assumes"]["ios"] == "15.0" and good_data["assumes"]["android_api"] == "26"
+    elif tool == "diff_lockfiles":
+        assert default_data["worse"][0]["targets"] == {
+            target: {"old_status": "wheel", "new_status": "missing"} for target in ("ios-arm64", "android-arm64")
+        }
+        assert good_data["worse"] == []
+    else:
+        assert default_data["gaps"][0]["results"] == missing and good_data["gaps"] == []
+
+
+@pytest.mark.parametrize(
+    ("floor", "value", "target", "tag"),
+    [
+        ("glibc", "2.17", "linux-x86_64", "manylinux_2_28_x86_64"),
+        ("musl", "1.1", "musl-x86_64", "musllinux_1_2_x86_64"),
+        ("macos", "13.0", "macos-arm64", "macosx_14_0_arm64"),
+    ],
+)
+def test_diff_lockfiles_desktop_version_floors(fake_pypi, tmp_path, floor, value, target, tag):
+    old, new = lockfile_pair(
+        tmp_path, uv_package("floorpkg", "1.0"), uv_package("floorpkg", "1.1", tags=(f"cp313-cp313-{tag}",))
+    )
+    args = {"old": old, "new": new, "python": "3.13", "targets": [target]}
+    _, default, override = run(
+        init(), call("diff_lockfiles", **args), call("diff_lockfiles", 2, **args, **{floor: value})
+    )
+    assert default["result"]["structuredContent"]["worse"] == []
+    assert override["result"]["structuredContent"]["worse"][0]["targets"] == {
+        target: {"old_status": "wheel", "new_status": "missing"}
+    }
+    assert not fake_pypi
 
 
 def test_diff_lockfiles_reports_a_wheel_lost_to_source(fake_pypi, tmp_path):
@@ -2088,7 +2158,7 @@ def test_diff_lockfiles_malformed_lockfile_is_a_tool_error(fake_pypi, tmp_path):
         ({"old": "{tmp}/old.lock"}, "don't know how to read"),  # the saved copy needs its real name
         ({"targets": ["linux-aarch46"]}, "linux-aarch46"),
         ({"python": "three"}, "can't read Python version"),
-        ({"glibc": "2.28"}, "unknown argument(s): glibc"),
+        ({"glibc": "abc"}, "can't parse glibc version"),
         ({"old": "{tmp}/notes.md"}, "don't know how to read"),
         ({"old": "{tmp}/empty"}, "no lockfile found"),
     ],
@@ -2255,6 +2325,7 @@ def test_explain_install_failure_lone_surrogate_within_the_limit_is_read(fake_py
         ({"log": "  \n"}, "'log' must be a non-empty string"),
         ({"log": 1}, "'log' must be a non-empty string"),
         ({"log": "x", "platforms": ["win-amd64"]}, "unknown argument(s): platforms"),
+        ({"log": "x", "ios": "15.0", "android_api": "26"}, "unknown argument(s): android_api, ios"),
         ({"log": "x", "targets": ["linux-aarch46"]}, "linux-aarch46"),
         ({"log": "x", "python": "three"}, "can't read Python version"),
     ],

@@ -26,7 +26,8 @@ All eight are read-only. Package checks look packages up on PyPI, or on the inde
 
 - `check_package`: one package, the latest release or a given version, on each
   target. `explain: true` adds why each target with a gap can't use its
-  wheels, and `dependencies: true` checks what it installs too.
+  wheels, and `dependencies: true` checks what it installs too. The response's
+  `assumes` includes the platform version floors used for the check.
 - `check_lockfile`: the same answer as `wheelgap PATH --json`, `[tool.wheelgap]`
   settings included: the packages with gaps, the ones it skipped (git, path and
   private-index packages, which aren't checked) and any notes. It also returns
@@ -58,11 +59,13 @@ All eight are read-only. Package checks look packages up on PyPI, or on the inde
   directory. An agent that cuts releases can gate the upload on it, the way the
   [Action's `dist` input](ci.md#before-a-release) does in a workflow.
 - `diff_lockfiles`: takes an `old` and a `new` lockfile (plus `python` and
-  `targets`) and answers as `wheelgap diff OLD NEW --json` does, with `ok`
+  `targets` and optional platform version floors) and answers as
+  `wheelgap diff OLD NEW --json` does, with `ok`
   added: the packages that got worse on a target and the new ones with gaps. An
   agent that bumps dependencies can save the old lockfile under its own name
   (`mkdir -p /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock`) and ask
-  whether the upgrade lost a wheel.
+  whether the upgrade lost a wheel. Pass any floors that differ from the
+  defaults explicitly. This tool does not read `[tool.wheelgap]` settings.
 - `explain_install_failure`: takes the text of a failed install log (up to 1 MB)
   and reads it as [`--from-log`](cli.md#from-log) does: pip's `Failed to build` summary
   (its versions from the `Collecting`, `Downloading` and `Using cached` lines),
@@ -96,7 +99,8 @@ All eight are read-only. Package checks look packages up on PyPI, or on the inde
   before checking their project. A missing folder, the filesystem root and the
   home folder are tool errors, and files that are symlinks out of the project
   are listed as unreadable, not read.
-- `list_targets`: the platform names the other tools accept.
+- `list_targets`: the platform names the other tools accept and the built-in
+  glibc, musl, macOS, iOS and Android API floors in `defaults`.
 
 For example, to check everything `requirements.txt` installs, call
 `check_lockfile` with `{"path": "requirements.txt", "python": "3.13",
@@ -145,6 +149,8 @@ for `check_dist` the nearest folder above the dist folder with a
 | `glibc` | string | `2.36` | glibc version for `linux-*` targets, e.g. '2.28' for a RHEL 8 image. |
 | `musl` | string | `1.2` | musl version for `musl-*` (Alpine) targets. |
 | `macos` | string | `14.0` | Oldest macOS version to support. |
+| `ios` | string | `13.0` | Oldest iOS version to support, e.g. '15.0'. |
+| `android_api` | string | `24` | Minimum Android API level to support, e.g. '26'. |
 | `pyodide_lock` | string | none | Absolute path or https URL of a Pyodide release's `pyodide-lock.json`, so packages that release ships itself count as 'bundled' on pyodide targets for its Python. |
 | `explain` | boolean | `false` | Also return `rejected` (and `via`, always empty for one package) and `issues_url` (the package's issue tracker from PyPI metadata): why each source or missing target can't use the published wheels. |
 | `dependencies` | boolean | `false` | Also check everything the package installs (its dependency tree, resolved from PyPI for each target, as `--deps` does) and return `dependency_gaps`. |
@@ -160,6 +166,8 @@ for `check_dist` the nearest folder above the dist folder with a
 | `glibc` | string | `[tool.wheelgap] glibc` or `distro`, else `2.36` | glibc version for `linux-*` targets, e.g. '2.28' for a RHEL 8 image. |
 | `musl` | string | `[tool.wheelgap] musl` or `distro`, else `1.2` | musl version for `musl-*` (Alpine) targets. |
 | `macos` | string | `[tool.wheelgap] macos`, else `14.0` | Oldest macOS version to support. |
+| `ios` | string | `[tool.wheelgap] ios`, else `13.0` | Oldest iOS version to support, e.g. '15.0'. |
+| `android_api` | string | `[tool.wheelgap] android-api`, else `24` | Minimum Android API level to support, e.g. '26'. |
 | `pyodide_lock` | string | `[tool.wheelgap] pyodide-lock` (when a pyodide target is checked) | Absolute path or https URL of a Pyodide release's `pyodide-lock.json`. |
 | `offline` | boolean | `[tool.wheelgap] offline`, else `false` | Use only the files recorded in the lockfile; never contact the index. `true` turns it on; `offline = true` in the project can't be turned off from here. |
 | `dependencies` | boolean | `false` | Resolve transitive dependencies of requirements files, a conda `environment.yml`, `pyproject.toml` and a script's `# /// script` block with `--deps`; each gap gets `via` and `direct`. Refused for lockfiles, offline and another index. |
@@ -183,6 +191,8 @@ for `check_dist` the nearest folder above the dist folder with a
 | `glibc` | string | `[tool.wheelgap] glibc` or `distro`, else `2.36` | glibc version for `linux-*` targets, e.g. '2.28' for a RHEL 8 image. |
 | `musl` | string | `[tool.wheelgap] musl` or `distro`, else `1.2` | musl version for `musl-*` (Alpine) targets. |
 | `macos` | string | `[tool.wheelgap] macos`, else `14.0` | Oldest macOS version to support. |
+| `ios` | string | `[tool.wheelgap] ios`, else `13.0` | Oldest iOS version to support, e.g. '15.0'. |
+| `android_api` | string | `[tool.wheelgap] android-api`, else `24` | Minimum Android API level to support, e.g. '26'. |
 
 #### `diff_lockfiles`
 
@@ -192,6 +202,11 @@ for `check_dist` the nearest folder above the dist folder with a
 | `new` | string | required | Absolute path to the lockfile (or project directory) after the change. |
 | `python` | string | the server's | Target Python version(s), comma-separated, e.g. '3.13' or '3.12,3.14t' (t = free-threaded); 'next' and 'next-t' mean the newest CPython wheelgap knows. |
 | `targets` | array of strings | the four default platforms | Platforms, e.g. ['linux-aarch64', 'musl-x86_64', 'win-arm64', 'pyodide'], Docker platforms such as 'linux/arm64', or the groups 'all', 'everything' and 'mobile'. `list_targets` gives every name. |
+| `glibc` | string | `2.36` | glibc version for `linux-*` targets, e.g. '2.28' for a RHEL 8 image. |
+| `musl` | string | `1.2` | musl version for `musl-*` (Alpine) targets. |
+| `macos` | string | `14.0` | Oldest macOS version to support. |
+| `ios` | string | `13.0` | Oldest iOS version to support, e.g. '15.0'. |
+| `android_api` | string | `24` | Minimum Android API level to support, e.g. '26'. |
 
 #### `explain_install_failure`
 

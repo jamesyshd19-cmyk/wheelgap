@@ -67,7 +67,9 @@ from .sources import SourceError
 from .suggest_targets import suggest, to_json
 from .targets import (
     ALIASES,
+    DEFAULT_ANDROID_API,
     DEFAULT_GLIBC,
+    DEFAULT_IOS,
     DEFAULT_MACOS,
     DEFAULT_MUSL,
     DEFAULT_PLATFORMS,
@@ -151,13 +153,28 @@ _TARGETS_PROP = {
         "list_targets gives every name."
     ),
 }
-_VERSION_PROPS = {
+_DESKTOP_VERSION_PROPS = {
     "glibc": {
         "type": "string",
         "description": f"glibc version for linux-* targets, e.g. '2.28' for a RHEL 8 image. Default: {DEFAULT_GLIBC}.",
     },
     "musl": {"type": "string", "description": f"musl version for musl-* (Alpine) targets. Default: {DEFAULT_MUSL}."},
     "macos": {"type": "string", "description": f"Oldest macOS version to support. Default: {DEFAULT_MACOS}."},
+}
+_VERSION_PROPS = {
+    **_DESKTOP_VERSION_PROPS,
+    "ios": {"type": "string", "description": f"Oldest iOS version to support. Default: {DEFAULT_IOS}."},
+    "android_api": {
+        "type": "string",
+        "description": f"Minimum Android API level to support. Default: {DEFAULT_ANDROID_API}.",
+    },
+}
+_VERSION_DEFAULTS = {
+    "glibc": DEFAULT_GLIBC,
+    "musl": DEFAULT_MUSL,
+    "macos": DEFAULT_MACOS,
+    "ios": DEFAULT_IOS,
+    "android_api": DEFAULT_ANDROID_API,
 }
 _PYODIDE_LOCK_PROP = {
     "type": "string",
@@ -381,8 +398,8 @@ TOOLS: list[dict[str, Any]] = [
             " private index) counts as worse; 'unchecked' names packages unknown on both sides at the same version. "
             "Pass the old lockfile as 'old' under its own file name, since the name says how to read it: e.g. `mkdir -p"
             " /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock` (this works after the upgrade too, until it's "
-            "committed). Unlike `wheelgap diff`, the project's [tool.wheelgap] settings don't apply: pass python and "
-            "targets. " + _STATUS_HELP
+            "committed). Unlike `wheelgap diff`, the project's [tool.wheelgap] settings don't apply: pass python, "
+            "targets and any version floors that differ from the defaults. " + _STATUS_HELP
         ),
         "inputSchema": {
             "type": "object",
@@ -397,6 +414,7 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "python": _PYTHON_PROP | {"description": _PYTHON_PROP["description"] + " Default: the server's."},
                 "targets": _TARGETS_PROP,
+                **_VERSION_PROPS,
             },
             "required": ["old", "new"],
             "additionalProperties": False,
@@ -443,7 +461,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": str(_TARGETS_PROP["description"])
                     + " Pass the platform the install ran on: the log doesn't say."
                 },
-                **_VERSION_PROPS,
+                **_DESKTOP_VERSION_PROPS,
             },
             "required": ["log"],
             "additionalProperties": False,
@@ -475,7 +493,7 @@ TOOLS: list[dict[str, Any]] = [
         "name": "list_targets",
         "title": "List target platforms",
         "description": "List the platform names and groups that check_package, check_lockfile, check_dockerfile, "
-        "check_dist, diff_lockfiles and explain_install_failure accept.",
+        "check_dist, diff_lockfiles and explain_install_failure accept, and the built-in target version floors.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": _READ_ONLY | {"openWorldHint": False},
     },
@@ -535,6 +553,10 @@ def _versions(args: dict[str, Any]) -> dict[str, str]:
         if value is not None and value.strip():
             out[key] = value.strip()
     return out
+
+
+def _version_flags(args: dict[str, Any]) -> list[str]:
+    return [f"--{key.replace('_', '-')}={value}" for key, value in _versions(args).items()]
 
 
 def _lock_spec(args: dict[str, Any]) -> str:
@@ -680,11 +702,7 @@ def _check_package(args: dict[str, Any]) -> dict[str, Any]:
             for k, v in _way_out(ways[id(r)]).items():
                 merged[k].update(v)
         out.update(merged)
-    out["assumes"] = {
-        "glibc": versions.get("glibc", DEFAULT_GLIBC),
-        "musl": versions.get("musl", DEFAULT_MUSL),
-        "macos": versions.get("macos", DEFAULT_MACOS),
-    }
+    out["assumes"] = _VERSION_DEFAULTS | versions
     return out
 
 
@@ -704,7 +722,7 @@ def _check_lockfile(args: dict[str, Any]) -> dict[str, Any]:
         argv.append(f"--environment={environment}")
     argv += [f"--python={p}" for p in _pythons(args)]
     argv += [f"--target={p}" for p in _platforms(args)]
-    argv += [f"--{key}={value}" for key, value in _versions(args).items()]
+    argv += _version_flags(args)
     if lock_spec := _lock_spec(args):
         argv.append(f"--pyodide-lock={lock_spec}")
     if offline:
@@ -795,7 +813,7 @@ def _check_dist(args: dict[str, Any]) -> dict[str, Any]:
     argv = ["--json", f"--dist={dist}"]
     argv += [f"--python={p}" for p in _pythons(args)]
     argv += [f"--target={p}" for p in _platforms(args)]
-    argv += [f"--{key}={value}" for key, value in _versions(args).items()]
+    argv += _version_flags(args)
     # The project that built it: the nearest folder above with a pyproject.toml (dist/ beside it, or maturin's
     # target/wheels), else the folder holding it. Never the server's working directory, another project's.
     # abspath collapses ".." (Path.parents works on the text: app/../legacy/dist would pass through app/) and keeps
@@ -817,7 +835,7 @@ def _diff_lockfiles(args: dict[str, Any]) -> dict[str, Any]:
     _check_keys("diff_lockfiles", args)
     paths = [_existing(_string(args, key, required=True) or "") for key in ("old", "new")]
     try:
-        targets = make_targets(_pythons(args) or None, _platforms(args) or None)
+        targets = make_targets(_pythons(args) or None, _platforms(args) or None, **_versions(args))
     except TargetError as e:
         raise ToolError(str(e)) from e
     sides = []
@@ -1101,7 +1119,7 @@ def _list_targets(args: dict[str, Any]) -> dict[str, Any]:
         "default": list(DEFAULT_PLATFORMS),
         "groups": {"all": NATIVE_PLATFORMS, "everything": EVERY_NATIVE_PLATFORM, "mobile": MOBILE_PLATFORMS},
         "aliases": dict(ALIASES),
-        "defaults": {"glibc": DEFAULT_GLIBC, "musl": DEFAULT_MUSL, "macos": DEFAULT_MACOS},
+        "defaults": dict(_VERSION_DEFAULTS),
         "server_python": running_python(),
     }
 
